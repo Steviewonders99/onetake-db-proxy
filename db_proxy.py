@@ -46,17 +46,60 @@ pool: asyncpg.Pool | None = None
 
 # ── Middleware: Auth ──────────────────────────────────────────────
 
-@web.middleware
-async def auth_middleware(request: web.Request, handler):
-    if request.path == "/health":
-        return await handler(request)
+# ── Rate limiting (in-memory, per-IP) ────────────────────────────
+_rate_limiter: dict[str, list[float]] = {}
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX = 120     # requests per window
 
-    if PROXY_SECRET:
+def _check_rate_limit(ip: str) -> bool:
+    """Returns True if request is allowed, False if rate limited."""
+    import time
+    now = time.time()
+    if ip not in _rate_limiter:
+        _rate_limiter[ip] = []
+    # Purge old entries
+    _rate_limiter[ip] = [t for t in _rate_limiter[ip] if now - t < RATE_LIMIT_WINDOW]
+    if len(_rate_limiter[ip]) >= RATE_LIMIT_MAX:
+        return False
+    _rate_limiter[ip].append(now)
+    return True
+
+
+@web.middleware
+async def security_middleware(request: web.Request, handler):
+    # Rate limiting
+    ip = request.remote or "unknown"
+    if not _check_rate_limit(ip):
+        return web.json_response({"error": "Rate limited"}, status=429)
+
+    # Auth check (skip for health endpoint)
+    if request.path != "/health":
+        if not PROXY_SECRET:
+            return web.json_response({"error": "Server misconfigured"}, status=500)
         auth = request.headers.get("Authorization", "")
-        if auth != f"Bearer {PROXY_SECRET}":
+        if not auth.startswith("Bearer ") or len(auth) < 20:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        # Constant-time comparison to prevent timing attacks
+        import hmac
+        provided = auth[7:]  # strip "Bearer "
+        if not hmac.compare_digest(provided, PROXY_SECRET):
             return web.json_response({"error": "Unauthorized"}, status=401)
 
-    return await handler(request)
+    # Execute handler with error sanitization
+    try:
+        response = await handler(request)
+    except Exception:
+        # Never leak internal error details
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Server"] = "onetake-proxy"  # hide Python/aiohttp version
+    response.headers["Referrer-Policy"] = "no-referrer"
+
+    return response
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -272,7 +315,7 @@ async def on_cleanup(app: web.Application):
 
 
 def create_app() -> web.Application:
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application(middlewares=[security_middleware])
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
 
