@@ -198,6 +198,42 @@ async def trigger_sync(request: web.Request):
     return web.json_response({"ok": True, "steps": results})
 
 
+async def get_ga4_funnel(request: web.Request):
+    """GA4 acquisition funnel: WP entry → profile → NDA per project."""
+    pid = request.match_info["id"]
+    rows = await query(
+        "SELECT campaign_name, source, medium, wp_entry, profile_created, nda_signed "
+        "FROM ga4_project_funnel WHERE project_id = $1::UUID ORDER BY nda_signed DESC",
+        pid,
+    )
+    # Aggregate totals
+    total_wp = sum(r.get("wp_entry", 0) for r in rows)
+    total_profile = sum(r.get("profile_created", 0) for r in rows)
+    total_nda = sum(r.get("nda_signed", 0) for r in rows)
+
+    return web.json_response({
+        "by_source": rows,
+        "totals": {
+            "wp_entry": total_wp,
+            "profile_created": total_profile,
+            "nda_signed": total_nda,
+            "wp_to_profile_rate": round(total_profile / total_wp * 100, 1) if total_wp > 0 else 0,
+            "wp_to_nda_rate": round(total_nda / total_wp * 100, 1) if total_wp > 0 else 0,
+        },
+    })
+
+
+async def get_locales(request: web.Request):
+    """Per-language apply links + platform request IDs for a project."""
+    pid = request.match_info["id"]
+    rows = await query(
+        "SELECT language, apply_url, platform_request_id, is_active, first_seen_at, last_seen_at "
+        "FROM project_locale_links WHERE project_id = $1::UUID ORDER BY language",
+        pid,
+    )
+    return web.json_response(rows)
+
+
 async def refresh_view(request: web.Request):
     try:
         await execute("REFRESH MATERIALIZED VIEW project_weekly_summary")
@@ -232,6 +268,8 @@ def create_app() -> web.Application:
     app.router.add_get("/projects/unclassified", get_unclassified)
     app.router.add_get("/projects/{id}", get_project)
     app.router.add_get("/projects/{id}/funnel", get_funnel)
+    app.router.add_get("/projects/{id}/ga4-funnel", get_ga4_funnel)
+    app.router.add_get("/projects/{id}/locales", get_locales)
     app.router.add_get("/projects/{id}/channels", get_channels)
     app.router.add_post("/projects/sync", trigger_sync)
     app.router.add_post("/refresh", refresh_view)
