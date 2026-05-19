@@ -202,23 +202,36 @@ async def get_ga4_funnel(request: web.Request):
     """GA4 acquisition funnel: WP entry → profile → NDA per project."""
     pid = request.match_info["id"]
     rows = await query(
-        "SELECT campaign_name, source, medium, wp_entry, profile_created, nda_signed "
+        "SELECT campaign_name, source, medium, wp_entry, apply_click, signup, mfa_setup, "
+        "profile_created, nda_signed, certification, browsing_jobs, doing_tasks "
         "FROM ga4_project_funnel WHERE project_id = $1::UUID ORDER BY nda_signed DESC",
         pid,
     )
-    # Aggregate totals
-    total_wp = sum(r.get("wp_entry", 0) for r in rows)
-    total_profile = sum(r.get("profile_created", 0) for r in rows)
-    total_nda = sum(r.get("nda_signed", 0) for r in rows)
 
+    def total(key):
+        return sum(r.get(key, 0) or 0 for r in rows)
+
+    tw = total("wp_entry")
     return web.json_response({
         "by_source": rows,
         "totals": {
-            "wp_entry": total_wp,
-            "profile_created": total_profile,
-            "nda_signed": total_nda,
-            "wp_to_profile_rate": round(total_profile / total_wp * 100, 1) if total_wp > 0 else 0,
-            "wp_to_nda_rate": round(total_nda / total_wp * 100, 1) if total_wp > 0 else 0,
+            "wp_entry": tw,
+            "apply_click": total("apply_click"),
+            "signup": total("signup"),
+            "mfa_setup": total("mfa_setup"),
+            "profile_created": total("profile_created"),
+            "nda_signed": total("nda_signed"),
+            "certification": total("certification"),
+            "browsing_jobs": total("browsing_jobs"),
+            "doing_tasks": total("doing_tasks"),
+        },
+        "rates": {
+            "wp_to_apply": round(total("apply_click") / tw * 100, 1) if tw > 0 else 0,
+            "wp_to_signup": round(total("signup") / tw * 100, 1) if tw > 0 else 0,
+            "wp_to_nda": round(total("nda_signed") / tw * 100, 1) if tw > 0 else 0,
+            "wp_to_tasks": round(total("doing_tasks") / tw * 100, 1) if tw > 0 else 0,
+            "nda_to_tasks": round(total("doing_tasks") / total("nda_signed") * 100, 1) if total("nda_signed") > 0 else 0,
+            "apply_to_nda": round(total("nda_signed") / total("apply_click") * 100, 1) if total("apply_click") > 0 else 0,
         },
     })
 
